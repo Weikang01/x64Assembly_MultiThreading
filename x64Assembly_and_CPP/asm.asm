@@ -37,17 +37,44 @@
 ;    LPDWORD is the same as "unsigned long*".
 
 .data
+mutex dw 0   ; Our Mutex!
+
 extern CreateThread: proc
 
 .code
 
+;;   Locked instructions
+;;   Time: 997
+;;   Mutex
+;;   Time: 89
 ThreadStartProc proc
-	mov rax, 1000000
-	LoopHead:
-	lock inc dword ptr [rcx]
+	mov rax, 10000000
 
-	dec	rax
-	jnz LoopHead
+	SpinLoop:          ; Spin lock with a Mutex!
+	lock bts mutex, 0
+	jc SpinLoop
+
+	; Critical Section!
+
+	mov rdx, 1000
+	InnerLoop:
+	inc dword ptr [rcx]
+
+	dec rdx
+	jnz InnerLoop
+
+	mov mutex, 0       ; Release the mutex!
+	; We have left the critical section!
+
+	sub rax, 1000
+	jnz SpinLoop
+
+;;   Locked instructions
+;	LoopHead:
+;	lock inc dword ptr [rcx]
+;
+;	dec	rax
+;	jnz LoopHead
 	
 	ret
 ThreadStartProc endp

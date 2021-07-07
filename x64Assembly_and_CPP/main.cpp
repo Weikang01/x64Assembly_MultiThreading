@@ -168,26 +168,103 @@ The LOCK prefix can be applied to many of the x86 arithmetic instructions which 
 If you are unsure if the LOCK prefix is allowed for a particular instruction, check the AMD and Intel manuals.
 */
 /*
+- Mutexes/SpinLock/Critical Sections
+These three are often introduced as being the same thing. Like, a Mutex is "always" a type of SpinLock, and they're always Critical Sections etc.
+As we shall see, this not actually the case. Mutexes are an abstract datatype with many usages, one of which is a SpinLock, which can be used to guard a Critical Section.
+
+- Mutex
+A Mutex is a parallel primitive. The idea of Mutexes has been around for a long time, but Mutexes were officially named and invented by Edsger Dijkstra, who also gave us the Shunting Yard algorithm, Semaphores and Dijkstra's Algorithm for the shortest Path First.
+A Mutex is an abstract object that only allows one thread to "own" it at once. The name comes from "Mutually Exclusive", because if one thread owns the Mutex, it is to the exclusion of all the others.
+
+- SpinLocks
+When a second thread tries to grab a Mutex that is owned already, the second thread might enter a loop. It might just wait for the Mutex to be released. When a thread does nothing but loop in circles, waiting for Mutex, it is called a SpinLock. The Mutex locks threads until it is released, and the locked threadds do nothing but spin.
+Spinlocks are rather simple, and there are drawbacks. The spinning threads are still alive, but they're not doing anything useful! SpinLocks are just one tool we can make with a Mutex, and like any tools, they are not a solution for all problems.
+
+- Critical Sections
+Critical sections are a useful tool for a multitude of common parallel programming problems. A critical section is a portion of code that only one thred is allowed to execute at once. They are useful for avoiding race conditions when threads share resources. If a second thread approaches, then it must wait until the first leaves the critical section.
+
+SomeFunction()
+{
+    EnterCriticalSection();
+    // Only one thread will execute these lines at once
+
+    LeaveCriticalSection();
+}
+
+- Diagram with Note-Worthy Perspective!
+So a Critical Section is just like a room with a lock and a single key. Only one thread is allowed into the room at once, and the thread locks the door behind it!
+
+- Summary of all 3 Terms
+A Mutex is like a lock and key, only one of the threads which shares a Mutex can own the Mutex at once (there are others which I'll mention in a moment).
+A Mutex can be used to create a Spinlock. If any thread tries to grab the Mutex when it is already owned, the thread spins until the Mutex becomes available again.
+A Critical Section can be guarded by a SpinLock, such that only one thread is allowed in at a time, and the rest Spin.
+
+- DeadLock
+A DeadLock occurs when threads cannot advance. If we have two threads, and one grabs a Mutex, but does not release it, and retires; the second thread can never grab the Mutex. We have a DeadLock, the second thread will spin forever.
+It seems like a easy situation to avoid, and for our current level of discussion, it is. But, we will see that DeadLock can be very deceptive. Together with Race Conditions, DeadLock keeps even the best programmers on their toes when designing algorithms.
+
+- Using a Mutex SpinLock to Implement a Critical Section
+When a thread approaches the critical section, there's only two possiblities:
+Either the door is open, and the key is available, i.e. a Mutex is not owned by any other thread. Or, the door is locked, and the key is inside. i.e. The Mutex has been claimed by some other thread.
+A single bit could store the state of one Mutex. We could use several data types, the "byte" is the most conservative. We could store 8 Mutexes ina byte, of 16 in a word etc.
+
+- How do we Create a Mutex SpinLock?
+We want to create a Mutex, so we can guard our Critical Section with a SpinLock, but how? We can't use CMP and INC. By the time one thread tests with CMP, another thread might hustle and check if the key is available as well. That's a race condition. Both threads would think the key is available. The second thread would sneak into the critical section behind the first, and we'd have race conditions!
+So to implement a Mutex SpinLock, we need a special type of instruction. An instruction that both tests and the sets the state of the Mutex in one, Atomic step...
+
+- BTS
+Bit Test and Set! This instruction tests a bit by copying it to the Carry Flag. But it also sets it to 1.This means that the bit will become 1, whether it was set or not. But, we'll have a record of the value that the bit was in the Carry Flag. The instructions supports the LOCK prefix, so it can be done atomically!
+
+SpinLoop:
+    LOCK BTS mutex, 0  ; Test and set bit 0 of mutex
+    JC SpinLoop        ; If it's already taken, spin
+
+- Why does this work?
+If a thread executes "LOCK BTS mutex, 0", one of two things will happen:
+    1) The Carry flag will be set to 0, and the bit will be set to 1. The bit must have been 0 prior to the instruction, thus, this thread now owns the Mutex!
+    2) The Carry flag will be set to 1, and the bit was already 1, so it will not change. The Mutex must be owned already, this thread must block or spin until the Mutex is released.
+So we can check the Carry Flag with JC after an Atomic BTS.
+
+- Other Instructions that can be Used
+BTS is not the only instruction we can use in x86 to implement a Mutex. All we need is an instruction that atomically checks a value and sets it in the same move. In addition to BTS, the following instructions can also be used.
+    * BTR        - Bit Test and Reset
+    * BTC        - Bit Test and Complement
+    * CMPXCHG    - Compare and Exchange
+    * CMPXCHG8B  - Compare and Exchange 8 Bytes
+    * CMPXCHG16B - Compare and Exchange 16 Bytes
+
+- Other Types of Mutex
+The simple locked room analogy is only one use of a Mutex, i.e. guarding a Critical Section with a SpinLock. Another type allows multiple "readers" into the room, because reading shared data does not cause race conditions. But, only one "writer" thread is allowed. This is called a Readers-Writer Lock, or RW Lock.
+Also, threads don't have to spin when they wait. That's just a SpinLock. If there's a list of jobs to be done, instead of spining, a thread might work on the next job in the list. Or, the thread might yield its time slice, put itself to sleep so the OS can switch to some other thread until the Mutex is released.
+There are many usages and types of Mutex, the SpinLock is just one.
+*/
+/*
 */
 
 #include <Windows.h>
 #include <iostream>
+#include <time.h>
 
 using namespace std;
 
-extern "C" void ThreadStartProc(int* i);
 extern "C" HANDLE CreateThreadInASM(int* i);
 
 int main()
 {
-    int i = 0;
-    HANDLE threadHandle = CreateThreadInASM(&i);
+    int j = 0;
 
-    ThreadStartProc(&i);
+    HANDLE handles[5];
 
-    WaitForSingleObject(threadHandle, INFINITE);
+    long startTime = clock();
 
-    cout <<"Value of i is: "<< i << endl;
+    for (int i = 0; i < 5; i++)
+        handles[i] = CreateThreadInASM(&j);
+
+    for (int i = 0; i < 5; i++)
+        WaitForSingleObject(handles[i], INFINITE);
+
+    cout << "Value of i is: " << j << endl;
+    cout << "The time taken is: " << clock() - startTime << endl;
 
     cin.get();
 }
