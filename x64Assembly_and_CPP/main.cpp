@@ -93,16 +93,101 @@ HANDLE WINAPI CreateThread(
     LPDWORD is the same as "unsigned long*".
 */
 /*
+- Race Conditions and Atomic Instructions
+- Before we go any further
+We need to make it clear that x86 Assembly instructions are not automatically Atomic.
+
+- Shared Resources
+Some resources belong to each thread. They are not shared, and each thread is in total control over them. The Core's registers for example. But there are other resources which are shared all threads.
+Shared resources are very useful because they allow threads to signal each other, and pass messages. Shared resources offer a means by which threads can talk and synchronise schedule their actions with respect one another.
+Without shared resources, there would be no way a thread could alter some value, which the other could read. There would be no communication between threads, and we would be very limited in what we could expect from Multithreading.
+
+- Read | Modify | Write
+Picture the instruction "INC dword ptr [rcx]". What does it do? It might seem a little odd, but this instruction, and all instructions which modify RAM, is not performed in a single step. There are actually three steps, called Read, Modify, Write:
+    - Read : Read the value at [rcx] into a temporary register
+    - Modify : Increment value in the temporary register
+    - Write : Save the result back to RAM at [rcx]
+Truth be told, there's a lot more than 3 steps, but that's hardware specific, and related to pipelining and performance. For this topic, the Read/Modify/Write cycle is all we need to consider.
+
+- Why is that a Problem?
+So we have a Read/Modify/Write cycle happening every time a thread updates a variable in RAM. The trouble comes about when the threads both try to update exactly the same variable! Let's have a look at two threads, both trying to increment a variable called MyVar.
+
+___________________ _________________________
+|Initially, MyVar | |Thread 1               |
+|begins at 0. Each| |Read MyVar into TMP    |
+|thread has a TMP | |Increment TMP          |
+|register         | |Write TMP back to MyVar| _______
+|                 | _________________________ |MyVar|
+|                 | _________________________ |0    |
+|                 | |Thread 2               | _______
+|                 | |Read MyVar into TMP    |
+|                 | |Increment TMP          |
+|                 | |Write TMP back to MyVar|
+___________________ _________________________
+
+- Step 1
+* Time Step 1: Thread 1 reads MyVar. At this point Thread 2 might be off doing its own thing somewhere else.
+- Step 2
+* Time Step 2: Thread 1 increments TMP. But, at exactly the same time, Thread 2 reads the value of MyVar!
+- Step 3
+* Time Step 3: Thread 1 writes the result back to MyVar, at the same time, Thread 2 increments.
+- Step 4
+* Time Step 4: Thread 1 is finished, it goes off to do something else. Thread 2 write its value.
+
+- The Result?
+The result is, two threads incremented a variable, but it only went up 1. This is usually a mistake. The programmer meant to increment the variable twice, and indeed the two threads did both perform an increment, but they performed the increment to their own TMP register, and wrote the same "1" to MyVar.
+
+- There are many other Scenarios
+The two threads perform their steps in any order with relation to each other. So Thread2 might read/modify.write before Thread 1 even starts. That would mean that MyVar has "1" when Thread 1 begins and we'd get the answer "2" after both threads were done.
+This is a Race Condition. The two threads are racing for the same resource, and the programmer is not in control of what is happening.
+
+- What a Race Condition is Not
+    * Multiple threads modifying and reading different variables.
+    * Multiple threads reading the same variable, but NOT modifying its value.
+    * Multiple threads modifying the same variable Atomically (more on this in a moment!)
+    * Two threads sharing a variable with synchronisation techniques to prevent the Race Condition,
+
+- On your marks... Get Set... Go!!!
+If two threads both try to update the same variable in x86, at least one will update successfully. At leaset one of the threads, and possibly both. And so, you could use a Race Condition as a legitimate programming mechanism. If you only need to know that at least one of the threads updated the variable, the Race Condition is not a problem.
+I can't stress how dangerous this is. It is not even considered a programming technique. To purposely cause a Race Condition is generally considered very bad form. And yet, there's no denying, if there's two threads vying are for a variable, and you only care that at least one update, then it is faster to ditch the synchronisation and sleeping, and let them Race!
+
+- Ok, that's the problem, how do we fix it?
+Atomic means indivisible. When an instruction takes multiple steps, Read/Modify/Write, the instruction is not Atomic. It is said to be interruptible. At any point during these three steps, another thread might begin its own Read/Modify/Write and we have Race Conditions causing grief.
+An atomic instruction, on the other hand, cannot be interrupted. The instruction is executed in a single step, and there is no chance any other threads can interrupt, or intercept the single step.
+There is no getting around the fact that this Read/Modify/Write must occur. It's how the CPU operates. But we need a way to allow only one thread to Read/Modify/Write at a time, we need a way to make an instruction Atomic.
+
+- The Way is: LOCK Prefix
+Modern x86 CPU's provide a special prefix, the LOCK prefix. Place the prefix left of a mnemonic*, and you've got yourself an Atomic instruction!
+    INC dword ptr [RCX]       ; Not Atomic
+    LOCK INC dword ptr [RCX]  ; Atomic
+(*It's not available for use with all instructions)
+
+- The LOCK Prefix
+The LOCK prefix causes the CPU to lock the RAM being written to until the instruction has completed. If any other threads try to interrupt the LOCK by reading or writing to the locked RAM, the CPU will pause the theads, until the LOCK is released.
+The LOCK prefix can be applied to many of the x86 arithmetic instructions which write to memory. It cannot be used with MMX, SSE, AVX instructions or MOV (since MOV is always Atomic!) and more. Some instructions were specifically invented for use with the LOCK prefix and they really only make sense from the perspective of this humble little wonder worm.
+If you are unsure if the LOCK prefix is allowed for a particular instruction, check the AMD and Intel manuals.
+*/
+/*
 */
 
+#include <Windows.h>
 #include <iostream>
 
 using namespace std;
 
-
-extern "C" char GetValueFromASM();
+extern "C" void ThreadStartProc(int* i);
+extern "C" HANDLE CreateThreadInASM(int* i);
 
 int main()
 {
-	cout << "ASM Said: " << GetValueFromASM() << endl;
+    int i = 0;
+    HANDLE threadHandle = CreateThreadInASM(&i);
+
+    ThreadStartProc(&i);
+
+    WaitForSingleObject(threadHandle, INFINITE);
+
+    cout <<"Value of i is: "<< i << endl;
+
+    cin.get();
 }
